@@ -1,44 +1,27 @@
 #!/usr/bin/env python3
-# Per-frame (stateless) compression test, now with the static Claude dictionary
-# (DATA_ZD). Each DATA frame is dict-compressed on its own -- no shared state, so a
-# mid-stream drop + reconnect can't desync. Test: many concurrent framed streams of
-# random + Claude-like data over a socketpair, asserting byte-exact, plus a ratio
-# check on realistic Claude traffic.
+# Per-frame (stateless) plain-zlib compression test. Each DATA frame is compressed
+# on its own -- no shared state, so a mid-stream drop + reconnect can't desync.
+# Many concurrent framed streams of random + text data over a socketpair, asserting
+# byte-exact, at the real CHUNK size the mux uses.
 import os, socket, struct, threading, random, sys, zlib
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from btdict import DICT
-
 HDR = struct.Struct(">HBH")
-DATA, CLOSE, DATA_ZD = 1, 2, 5
-
-def zdc(d):
-    co = zlib.compressobj(6, zlib.DEFLATED, zlib.MAX_WBITS, zlib.DEF_MEM_LEVEL, zlib.Z_DEFAULT_STRATEGY, DICT)
-    return co.compress(d) + co.flush()
-def zdd(d):
-    do = zlib.decompressobj(zlib.MAX_WBITS, DICT)
-    return do.decompress(d) + do.flush()
+DATA, CLOSE, DATA_Z = 1, 2, 4
 def enc(typ, p):
-    if typ == DATA and len(p) > 32:
-        z = zdc(p)
-        if len(z) < len(p): return DATA_ZD, z
+    if typ == DATA and len(p) > 64:
+        z = zlib.compress(p, 6)
+        if len(z) < len(p): return DATA_Z, z
     return typ, p
 def dec(typ, p):
-    return (DATA, zdd(p)) if typ == DATA_ZD else (typ, p)
+    return (DATA, zlib.decompress(p)) if typ == DATA_Z else (typ, p)
 
 def run_once(nstreams, seed):
     rng = random.Random(seed)
     a, b = socket.socketpair()
     originals, received, closed = {}, {}, set()
-    unit = (b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
-            b'"delta":{"type":"text_delta","text":"the quick brown fox "}}\n\n')
     for sid in range(1, nstreams + 1):
-        size = rng.randint(50_000, 1_500_000)
-        if rng.random() < 0.5:
-            originals[sid] = os.urandom(size)                       # incompressible
-        else:
-            originals[sid] = (unit * (size // len(unit) + 1))[:size]  # Claude-like SSE
+        size = rng.randint(50_000, 2_000_000)
+        originals[sid] = os.urandom(size) if rng.random() < 0.5 else (b'def f():\n    return 42  # comment\n' * (size // 30))[:size]
         received[sid] = bytearray()
-
     def recvn(sock, n):
         buf = b""
         while len(buf) < n:
@@ -64,26 +47,19 @@ def run_once(nstreams, seed):
     def sender(sid):
         data = originals[sid]; i = 0
         while i < len(data):
-            chunk = data[i:i + rng.randint(1, 32768)]; i += len(chunk)
+            chunk = data[i:i + rng.randint(1, 65535)]; i += len(chunk)   # up to the frame cap
             send(sid, DATA, chunk)
         send(sid, CLOSE)
     ts = [threading.Thread(target=sender, args=(s,)) for s in originals]
     for t in ts: t.start()
     for t in ts: t.join()
     rt.join(timeout=60); a.close(); b.close()
-    ok = all(bytes(received[s]) == originals[s] for s in originals)
-    return ok, sum(len(originals[s]) for s in originals)
+    return all(bytes(received[s]) == originals[s] for s in originals), sum(len(originals[s]) for s in originals)
 
 if __name__ == "__main__":
     allok = True; grand = 0
     for seed in range(8):
         ok, tot = run_once(6, seed); grand += tot
         print(f"seed {seed}: {'OK' if ok else 'FAIL'}  ({tot:,} bytes)"); allok &= ok
-    # ratio on realistic Claude SSE, framed @512 (small streaming frames)
-    sse = (b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
-           b'"delta":{"type":"text_delta","text":"explaining the code now "}}\n\n') * 300
-    plain = sum(len(zlib.compress(sse[i:i+512], 6)) for i in range(0, len(sse), 512))
-    dic   = sum(len(enc(DATA, sse[i:i+512])[1]) for i in range(0, len(sse), 512))
-    print(f"\nClaude SSE @512:  raw={len(sse):,}  plain={plain:,} ({len(sse)/plain:.1f}x)  dict={dic:,} ({len(sse)/dic:.1f}x)")
-    print(f"{'ALL PASS' if allok else 'FAILURES'}  ({grand:,} bytes byte-exact)")
+    print(f"\n{'ALL PASS' if allok else 'FAILURES'}  ({grand:,} bytes byte-exact, frames up to 65535)")
     sys.exit(0 if allok else 1)

@@ -10,21 +10,13 @@
 #
 # Frame: >HBH (stream_id, type, length) + payload.  type: 0=OPEN 1=DATA 2=CLOSE 3=PING
 # Usage: python3 bt-bridge-wsl.py [TRANSPORT_PORT]   (default 20000)
-import os, socket, struct, sys, threading, time, zlib
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from btdict import DICT
+import socket, struct, sys, threading, time, zlib
 
 CLAUDE = ("127.0.0.1", 8080)
 XPORT = int(sys.argv[1]) if len(sys.argv) > 1 else 20000
 HDR = struct.Struct(">HBH")
-OPEN, DATA, CLOSE, PING, DATA_Z, DATA_ZD = 0, 1, 2, 3, 4, 5   # _Z plain zlib, _ZD zlib+Claude dict (both stateless)
-
-def _zdc(d):
-    co = zlib.compressobj(6, zlib.DEFLATED, zlib.MAX_WBITS, zlib.DEF_MEM_LEVEL, zlib.Z_DEFAULT_STRATEGY, DICT)
-    return co.compress(d) + co.flush()
-def _zdd(d):
-    do = zlib.decompressobj(zlib.MAX_WBITS, DICT)
-    return do.decompress(d) + do.flush()
+OPEN, DATA, CLOSE, PING, DATA_Z = 0, 1, 2, 3, 4   # DATA_Z = per-frame zlib DATA (stateless)
+CHUNK = 65535                                     # read size; bigger frames compress better, still per-frame
 HB_EVERY = 5
 HB_TIMEOUT = 15
 
@@ -42,10 +34,10 @@ class Mux:
         self.last_recv = time.monotonic()
 
     def send(self, sid, typ, payload=b""):
-        if typ == DATA and len(payload) > 32:       # per-frame dict compression (stateless)
-            z = _zdc(payload)
+        if typ == DATA and len(payload) > 64:       # per-frame zlib (stateless)
+            z = zlib.compress(payload, 6)
             if len(z) < len(payload):
-                typ, payload = DATA_ZD, z
+                typ, payload = DATA_Z, z
         with self.wlock:
             try: self.t.sendall(HDR.pack(sid, typ, len(payload)) + payload)
             except OSError: pass
@@ -76,7 +68,7 @@ class Mux:
     def _pump_client(self, sid, sock):          # Claude -> mux
         try:
             while self.alive:
-                data = sock.recv(4096)
+                data = sock.recv(CHUNK)
                 if not data: break
                 self.send(sid, DATA, data)
         except OSError:
@@ -111,9 +103,9 @@ class Mux:
             if ln and payload is None: break
             if typ == PING:
                 continue
-            if typ in (DATA_Z, DATA_ZD):
+            if typ == DATA_Z:
                 try:
-                    payload = _zdd(payload) if typ == DATA_ZD else zlib.decompress(payload)
+                    payload = zlib.decompress(payload)
                 except zlib.error:
                     print("[wsl] bad compressed frame -> link down", flush=True)
                     break                        # mismatch/corruption: clean reconnect, never forward garbage

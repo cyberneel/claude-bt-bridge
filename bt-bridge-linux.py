@@ -7,23 +7,15 @@
 # stdlib + dbus/gi only.
 #
 # Frame: >HBH (stream_id, type, length) + payload.  type: 0=OPEN 1=DATA 2=CLOSE 3=PING
-import dbus, dbus.service, dbus.mainloop.glib, os, socket, struct, sys, threading, time, zlib
+import dbus, dbus.service, dbus.mainloop.glib, os, socket, struct, threading, time, zlib
 from gi.repository import GLib
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from btdict import DICT
 
 SPP_UUID = "00001101-0000-1000-8000-00805f9b34fb"
 PROFILE_PATH = "/cyber/spp"
 PROXY = ("127.0.0.1", 8080)
 HDR = struct.Struct(">HBH")
-OPEN, DATA, CLOSE, PING, DATA_Z, DATA_ZD = 0, 1, 2, 3, 4, 5   # _Z plain zlib, _ZD zlib+Claude dict (both stateless)
-
-def _zdc(d):                                      # per-frame compress with the static Claude dict
-    co = zlib.compressobj(6, zlib.DEFLATED, zlib.MAX_WBITS, zlib.DEF_MEM_LEVEL, zlib.Z_DEFAULT_STRATEGY, DICT)
-    return co.compress(d) + co.flush()
-def _zdd(d):                                      # per-frame decompress with the static Claude dict
-    do = zlib.decompressobj(zlib.MAX_WBITS, DICT)
-    return do.decompress(d) + do.flush()
+OPEN, DATA, CLOSE, PING, DATA_Z = 0, 1, 2, 3, 4   # DATA_Z = per-frame zlib DATA (stateless)
+CHUNK = 65535                                     # read size; bigger frames compress better, still per-frame
 HB_EVERY = 5       # send a heartbeat this often
 HB_TIMEOUT = 15    # declare the link dead after this much silence
 
@@ -50,11 +42,11 @@ class Mux:
 
     def send(self, sid, typ, payload=b""):
         raw = len(payload)
-        if typ == DATA and raw > 32:                # per-frame dict compression (stateless)
-            z = _zdc(payload)
+        if typ == DATA and raw > 64:                # per-frame zlib (stateless)
+            z = zlib.compress(payload, 6)
             if len(z) < raw:
-                typ, payload = DATA_ZD, z
-        if typ in (DATA, DATA_Z, DATA_ZD):
+                typ, payload = DATA_Z, z
+        if typ in (DATA, DATA_Z):
             global _sraw, _swire
             with _slock:
                 _sraw += raw; _swire += len(payload)
@@ -96,7 +88,7 @@ class Mux:
     def _pump_upstream(self, sid, sock):        # proxy -> RFCOMM
         try:
             while True:
-                data = sock.recv(4096)
+                data = sock.recv(CHUNK)
                 if not data:
                     break
                 self.send(sid, DATA, data)
@@ -128,9 +120,9 @@ class Mux:
                 break
             if typ == PING:
                 continue
-            if typ in (DATA_Z, DATA_ZD):
+            if typ == DATA_Z:
                 try:
-                    payload = _zdd(payload) if typ == DATA_ZD else zlib.decompress(payload)
+                    payload = zlib.decompress(payload)
                 except zlib.error:
                     print("[mux] bad compressed frame -> link down", flush=True)
                     break                        # mismatch/corruption: clean reconnect, never forward garbage
