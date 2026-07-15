@@ -127,3 +127,21 @@ so don't trust that flag.
   the Linux bridge waits for a new SPP connection), so it self-heals within a few
   seconds — but the *in-flight* request is lost, so cancel it in Claude and resend.
   If it doesn't recover, restart the Windows forwarder (it reopens the COM port).
+
+## Run as systemd user services (durable, easy start/stop)
+
+Copy the units and start them (logs go to journald — durable, auto-rotated):
+```bash
+mkdir -p ~/.config/systemd/user
+cp systemd/*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now claude-bt-proxy claude-bt-bridge
+```
+Control:
+```bash
+systemctl --user start|stop|restart claude-bt-bridge   # (and claude-bt-proxy)
+systemctl --user status claude-bt-bridge
+journalctl --user -u claude-bt-bridge -f                # live log
+```
+`./monitor.sh` reads these via journald. To auto-start at boot without logging in:
+`sudo loginctl enable-linger $USER`.

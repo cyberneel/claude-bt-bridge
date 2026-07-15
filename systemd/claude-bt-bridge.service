@@ -1,0 +1,12 @@
+[Unit]
+Description=claude-bt-bridge: Bluetooth SPP mux -> reverse proxy
+Wants=claude-bt-proxy.service
+After=claude-bt-proxy.service
+
+[Service]
+ExecStart=/usr/bin/python3 /home/cyber/Downloads/claude-bt-bridge/bt-bridge-linux.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

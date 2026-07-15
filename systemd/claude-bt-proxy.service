@@ -1,0 +1,10 @@
+[Unit]
+Description=claude-bt-bridge: reverse proxy to api.anthropic.com
+
+[Service]
+ExecStart=/usr/bin/python3 /home/cyber/Downloads/claude-bt-bridge/anthropic-reverse-proxy.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
