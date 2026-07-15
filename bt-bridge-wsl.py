@@ -16,7 +16,7 @@ CLAUDE = ("127.0.0.1", 8080)
 XPORT = int(sys.argv[1]) if len(sys.argv) > 1 else 20000
 HDR = struct.Struct(">HBH")
 OPEN, DATA, CLOSE, PING, DATA_Z = 0, 1, 2, 3, 4   # DATA_Z = per-frame zlib DATA (stateless)
-CHUNK = 65535                                     # read size; bigger frames compress better, still per-frame
+CHUNK = 4096                                      # read size; small frames = better interleaving, fewer drops
 HB_EVERY = 5
 HB_TIMEOUT = 15
 

@@ -15,7 +15,7 @@ PROFILE_PATH = "/cyber/spp"
 PROXY = ("127.0.0.1", 8080)
 HDR = struct.Struct(">HBH")
 OPEN, DATA, CLOSE, PING, DATA_Z = 0, 1, 2, 3, 4   # DATA_Z = per-frame zlib DATA (stateless)
-CHUNK = 65535                                     # read size; bigger frames compress better, still per-frame
+CHUNK = 4096                                      # read size; small frames = better interleaving, fewer drops
 HB_EVERY = 5       # send a heartbeat this often
 HB_TIMEOUT = 15    # declare the link dead after this much silence
 
@@ -32,8 +32,10 @@ def _stats_loop():
 
 class Mux:
     def __init__(self, fd):
-        os.set_blocking(fd, True)
-        self.fd = fd
+        # wrap the RFCOMM fd as a socket: recv/sendall/shutdown. Python sockets go
+        # to fd -1 on close, so there's no fd-reuse race like a bare os.close(fd).
+        self.sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM, fileno=fd)
+        self.sock.setblocking(True)
         self.wlock = threading.Lock()
         self.slock = threading.Lock()
         self.streams = {}
@@ -53,9 +55,7 @@ class Mux:
         frame = HDR.pack(sid, typ, len(payload)) + payload
         with self.wlock:
             try:
-                while frame:                    # os.write may write only part when the BT buffer is full
-                    n = os.write(self.fd, frame)
-                    frame = frame[n:]
+                self.sock.sendall(frame)        # loops internally; close-safe
             except OSError:
                 pass
 
@@ -63,7 +63,7 @@ class Mux:
         buf = b""
         while len(buf) < n:
             try:
-                chunk = os.read(self.fd, n - len(buf))
+                chunk = self.sock.recv(n - len(buf))
             except OSError:
                 return None                    # link dropped -> clean link-down
             if not chunk:
@@ -76,12 +76,12 @@ class Mux:
             time.sleep(HB_EVERY)
             self.send(0, PING)
 
-    def _watchdog(self):                        # ponytail: os.close to unblock the read; tiny fd-reuse race, acceptable
+    def _watchdog(self):
         while self.alive:
             time.sleep(3)
             if time.monotonic() - self.last_recv > HB_TIMEOUT:
                 print("[mux] no heartbeat -> forcing link down", flush=True)
-                try: os.close(self.fd)
+                try: self.sock.shutdown(socket.SHUT_RDWR)   # unblock the reader; no fd-reuse race
                 except OSError: pass
                 return
 
@@ -155,6 +155,8 @@ class Mux:
                 try: s.close()
                 except OSError: pass
             self.streams.clear()
+        try: self.sock.close()
+        except OSError: pass
 
 class Profile(dbus.service.Object):
     @dbus.service.method("org.bluez.Profile1", in_signature="", out_signature="")
