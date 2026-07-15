@@ -42,14 +42,15 @@ while true; do
   hr
 
   if [ -f "$PROXY_LOG" ]; then
-    recent=$(tail -n 2000 "$PROXY_LOG" 2>/dev/null)   # bounded read: cost is independent of log size
-    tot=$(grep -ac 'v1/messages' <<<"$recent")
-    ok=$(grep -aEc 'v1/messages.*-> 2' <<<"$recent")
-    bad=$(grep -aEc 'v1/messages.*-> (4|5)' <<<"$recent")
-    printf "API calls (last 2000): %s   %s   %s\n" "$tot" "$(g "2xx:$ok")" "$(r "4xx/5xx:$bad")"
+    # cumulative totals (whole file). Fine while the log stays modest; if you ever
+    # make logging durable and it grows huge, switch these to a `tail -n N` window.
+    tot=$(grep -ac 'v1/messages' "$PROXY_LOG" 2>/dev/null || echo 0)
+    ok=$(grep -aEc 'v1/messages.*-> 2' "$PROXY_LOG" 2>/dev/null || echo 0)
+    bad=$(grep -aEc 'v1/messages.*-> (4|5)' "$PROXY_LOG" 2>/dev/null || echo 0)
+    printf "API calls (total): %s   %s   %s\n" "$tot" "$(g "2xx:$ok")" "$(r "4xx/5xx:$bad")"
     hr
     echo "recent requests:"
-    tail -n 8 <<<"$recent" | sed 's/^/  /'
+    tail -n 8 "$PROXY_LOG" 2>/dev/null | sed 's/^/  /'
   else
     printf "no proxy log at %s\n" "$PROXY_LOG"
   fi
