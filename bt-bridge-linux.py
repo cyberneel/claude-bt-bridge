@@ -12,9 +12,10 @@ from gi.repository import GLib
 
 SPP_UUID = "00001101-0000-1000-8000-00805f9b34fb"
 PROFILE_PATH = "/cyber/spp"
-PROXY = ("127.0.0.1", 8080)
+PROXY = ("127.0.0.1", 8080)        # anthropic reverse proxy (Claude Code via ANTHROPIC_BASE_URL)
+TINYPROXY = ("127.0.0.1", 8888)    # general HTTP forward proxy (browser, via PAC)
 HDR = struct.Struct(">HBH")
-OPEN, DATA, CLOSE, PING, DATA_Z = 0, 1, 2, 3, 4   # DATA_Z = per-frame zlib DATA (stateless)
+OPEN, DATA, CLOSE, PING, DATA_Z, OPEN_PROXY = 0, 1, 2, 3, 4, 5   # OPEN_PROXY -> tinyproxy (browser)
 CHUNK = 4096                                      # read size; small frames = better interleaving, fewer drops
 HB_EVERY = 5       # send a heartbeat this often
 HB_TIMEOUT = 15    # declare the link dead after this much silence
@@ -127,11 +128,12 @@ class Mux:
                     print("[mux] bad compressed frame -> link down", flush=True)
                     break                        # mismatch/corruption: clean reconnect, never forward garbage
                 typ = DATA
-            if typ == OPEN:
+            if typ in (OPEN, OPEN_PROXY):
+                target = PROXY if typ == OPEN else TINYPROXY
                 try:
-                    sock = socket.create_connection(PROXY)
+                    sock = socket.create_connection(target)
                 except OSError as e:
-                    print(f"[mux] proxy connect failed: {e}", flush=True)
+                    print(f"[mux] connect {target} failed: {e}", flush=True)
                     self.send(sid, CLOSE)
                     continue
                 with self.slock:

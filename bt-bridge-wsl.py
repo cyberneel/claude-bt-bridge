@@ -12,10 +12,11 @@
 # Usage: python3 bt-bridge-wsl.py [TRANSPORT_PORT]   (default 20000)
 import socket, struct, sys, threading, time, zlib
 
-CLAUDE = ("127.0.0.1", 8080)
+CLAUDE = ("127.0.0.1", 8080)       # Claude Code endpoint (ANTHROPIC_BASE_URL)
+BROWSER = ("0.0.0.0", 8888)        # general HTTP proxy for the browser (PAC) -> tinyproxy
 XPORT = int(sys.argv[1]) if len(sys.argv) > 1 else 20000
 HDR = struct.Struct(">HBH")
-OPEN, DATA, CLOSE, PING, DATA_Z = 0, 1, 2, 3, 4   # DATA_Z = per-frame zlib DATA (stateless)
+OPEN, DATA, CLOSE, PING, DATA_Z, OPEN_PROXY = 0, 1, 2, 3, 4, 5   # OPEN_PROXY -> tinyproxy (browser)
 CHUNK = 4096                                      # read size; small frames = better interleaving, fewer drops
 HB_EVERY = 5
 HB_TIMEOUT = 15
@@ -58,11 +59,11 @@ class Mux:
             try: sock.close()
             except OSError: pass
 
-    def add_client(self, sock):
+    def add_client(self, sock, open_type=OPEN):
         with self.slock:
             sid = self.next_sid; self.next_sid = (self.next_sid % 65535) + 1
             self.streams[sid] = sock
-        self.send(sid, OPEN)
+        self.send(sid, open_type)
         threading.Thread(target=self._pump_client, args=(sid, sock), daemon=True).start()
 
     def _pump_client(self, sid, sock):          # Claude -> mux
@@ -129,20 +130,21 @@ class Mux:
             try: s.close()
             except OSError: pass
 
-def claude_listener():
+def listener(addr, open_type, label):
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(CLAUDE); srv.listen(64)
-    print(f"[wsl] Claude -> http://{CLAUDE[0]}:{CLAUDE[1]}", flush=True)
+    srv.bind(addr); srv.listen(64)
+    print(f"[wsl] {label} -> {addr[0]}:{addr[1]}", flush=True)
     while True:
         sock, _ = srv.accept()
         with clock: mux = current["mux"]
         if mux is None:
-            sock.close()                        # link down: fail fast (Claude retries)
+            sock.close()                        # link down: fail fast
         else:
-            mux.add_client(sock)
+            mux.add_client(sock, open_type)
 
-threading.Thread(target=claude_listener, daemon=True).start()
+threading.Thread(target=lambda: listener(CLAUDE,  OPEN,       "Claude API"), daemon=True).start()
+threading.Thread(target=lambda: listener(BROWSER, OPEN_PROXY, "browser proxy"), daemon=True).start()
 
 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
